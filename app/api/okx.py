@@ -3,10 +3,8 @@ import time
 
 import pandas as pd
 
-# from app.utils import get_with_proxy_rotation
 
-
-def get_okx_option_underlyings():
+def get_option_underlyings():
     url = "https://www.okx.com/api/v5/public/underlying"
     params = {"instType": "OPTION"}
 
@@ -16,7 +14,7 @@ def get_okx_option_underlyings():
     return data["data"][0]
 
 
-def get_okx_option_instruments(uly: str):
+def get_option_instruments(uly: str):
     url = "https://www.okx.com/api/v5/public/instruments"
     params = {"instType": "OPTION", "uly": uly}  # 必填参数
 
@@ -37,19 +35,19 @@ def get_okx_option_instruments(uly: str):
 
 
 def get_all_options():
-    underlyings = get_okx_option_underlyings()
+    underlyings = get_option_underlyings()
     all_options = []
 
     for uly in underlyings:
         print(f"正在获取 {uly} 的期权数据...")
-        options = get_okx_option_instruments(uly)
+        options = get_option_instruments(uly)
         all_options.extend(options)
         time.sleep(0.1)  # 控制速率
 
     return all_options
 
 
-def get_okx_instruments(
+def get_instruments(
     inst_type,
     uly: str = None,
     inst_family: str = None,
@@ -125,15 +123,162 @@ def get_okx_instruments(
         return None
 
 
-def get_all_okx_markets() -> pd.DataFrame:
+def get_all_markets() -> pd.DataFrame:
     inst_types = ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"]
     data = []
     for inst_type in inst_types:
         if inst_type == "OPTION":
-            underlyings = get_okx_option_underlyings()
+            underlyings = get_option_underlyings()
             for uly in underlyings:
-                data.append(get_okx_instruments(inst_type, uly))
+                data.append(get_instruments(inst_type, uly))
         else:
-            data.append(get_okx_instruments(inst_type))
-    df = pd.concat(data, axis=0)
+            data.append(get_instruments(inst_type))
+    df = pd.concat(data, axis=0, ignore_index=True)
+    return df
+
+
+def fetch_historical_candles(
+    inst_id: str,
+    bar="1m",
+    start_ms: int = None,
+    end_ms: int = None,
+):
+    """从 OKX API 获取历史K线图数据
+
+    Parameters
+    ----------
+    inst_id : str
+
+    bar : str, optional
+        K线图维度, by default "1m" 分钟线
+    start_ms : int, optional
+        起始ms时间戳, OKX API 设定为不包含起始时间点, by default None
+    end_ms : int, optional
+        截止ms时间戳, OKX API 设定为不包含截止时间点, by default None
+
+    Returns
+    -------
+    _type_
+        _description_
+    """
+    url = "https://www.okx.com/api/v5/market/history-candles"
+    period = 2 / 20  # 限速 20次/2s
+    all_data = []
+    current_end = end_ms
+    while True:
+        params = {"instId": inst_id, "bar": bar, "after": current_end, "limit": "100"}
+        if start_ms:
+            params["before"] = start_ms
+        try:
+            response = requests.get(url, params=params)
+            data = response.json()
+
+            # 错误处理
+            if data["code"] != "0":
+                print(f"API错误: {data['msg']}")
+                break
+            # 无数据处理
+            if not data["data"]:
+                break
+
+            candles = data["data"]
+            all_data.extend(candles)
+            # 获取最早一条数据的时间戳
+            earliest_ms = int(candles[-1][0])
+            if start_ms and earliest_ms <= start_ms:
+                break
+
+            current_end = earliest_ms - 1  # 避免重复
+            time.sleep(period)  # 控制请求频率
+
+        except Exception as e:
+            print(f"Error fetching data: {e}")
+            break
+    # 转换为DataFrame
+    df = pd.DataFrame(
+        all_data,
+        columns=[
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vol",
+            "volCcy",
+            "volCcyQuote",
+            "confirm",
+        ],
+    )
+    df["ts"] = pd.to_datetime(df["ts"].astype(int), utc=True, unit="ms")
+    df[["open", "high", "low", "close", "vol"]] = df[
+        ["open", "high", "low", "close", "vol"]
+    ].apply(pd.to_numeric)
+    return df.sort_values("ts").reset_index(drop=True)
+
+
+def fetch_historical_funding_rate(
+    inst_id: str,
+    start_ms: int = None,
+    end_ms: int = None,
+) -> pd.DataFrame:
+    """获取最近三个月的永续合约资金费率数据
+
+    Parameters
+    ----------
+    inst_id : str
+        OKX instrument ID
+    start_ms : int, optional
+        起始时间戳, OKX API 设定为不包含起始时间点, by default None
+    end_ms : int, optional
+        截止时间戳, OKX API 设定为不包含截止时间点, by default None
+
+    Returns
+    -------
+    pd.DataFrame
+        _description_
+    """
+    url = "https://www.okx.com/api/v5/public/funding-rate-history"
+    period = 2 / 10  # 限速 10次/2s
+    all_rates = []
+    current_end = end_ms
+    while True:
+        params = {"instId": inst_id, "after": current_end, "limit": "100"}
+        if start_ms:
+            params["before"] = start_ms
+        try:
+            response = requests.get(url, params=params)
+            data = response.json()
+
+            # 错误处理
+            if data["code"] != "0":
+                print(f"API错误: {data['msg']}")
+                break
+
+            if not data["data"]:
+                break
+
+            rates = data["data"]
+            all_rates.extend(rates)
+            # 获取最早一条数据的时间戳
+            earliest_ms = int(rates[-1]["fundingTime"])
+            if start_ms and earliest_ms <= start_ms:
+                break
+
+            current_end = earliest_ms - 1  # 避免重复
+            time.sleep(period)  # 控制请求频率（OKX公共接口限制10次/2秒）
+
+        except Exception as e:
+            print(f"请求失败: {e}")
+            break
+
+    # 转换为DataFrame
+    df = pd.DataFrame(all_rates)
+    if not df.empty:
+        df["fundingTime"] = pd.to_datetime(
+            df["fundingTime"].astype(int), utc=True, unit="ms"
+        )
+        df["fundingRate"] = df["fundingRate"].astype(float)
+        df["realizedRate"] = df["realizedRate"].astype(float)
+        df = df.sort_values("fundingTime").reset_index(drop=True)
+
     return df
