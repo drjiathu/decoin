@@ -1,7 +1,14 @@
-import requests
+from concurrent import futures
+import datetime
+from pathlib import Path
 import time
+from urllib.parse import unquote
 
 import pandas as pd
+import requests
+from tqdm import tqdm
+
+from app.utils import retry, stream_download, wait_then_exec
 
 
 def get_option_underlyings():
@@ -123,8 +130,10 @@ def get_instruments(
         return None
 
 
-def get_all_markets() -> pd.DataFrame:
-    inst_types = ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"]
+@retry(max_retries=3)
+def get_all_markets(inst_type: str = None) -> pd.DataFrame:
+    all_types = ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"]
+    inst_types = [inst_type] if inst_type else all_types
     data = []
     for inst_type in inst_types:
         if inst_type == "OPTION":
@@ -143,7 +152,7 @@ def fetch_historical_candles(
     start_ms: int = None,
     end_ms: int = None,
 ):
-    """从 OKX API 获取历史K线图数据
+    """从 API 获取最近几年的历史k线数据(1s k线支持查询最近3个月的数据)
 
     Parameters
     ----------
@@ -152,9 +161,9 @@ def fetch_historical_candles(
     bar : str, optional
         K线图维度, by default "1m" 分钟线
     start_ms : int, optional
-        起始ms时间戳, OKX API 设定为不包含起始时间点, by default None
+        起始ms时间戳, REST API 设定为不包含起始时间点, by default None
     end_ms : int, optional
-        截止ms时间戳, OKX API 设定为不包含截止时间点, by default None
+        截止ms时间戳, REST API 设定为不包含截止时间点, by default None
 
     Returns
     -------
@@ -216,69 +225,105 @@ def fetch_historical_candles(
     return df.sort_values("ts").reset_index(drop=True)
 
 
-def fetch_historical_funding_rate(
-    inst_id: str,
-    start_ms: int = None,
-    end_ms: int = None,
-) -> pd.DataFrame:
-    """获取最近三个月的永续合约资金费率数据
+@retry(max_retries=3)
+def fetch_funding_rate(inst_id: str) -> dict:
+    """获取永续合约资金费率数据
 
     Parameters
     ----------
     inst_id : str
-        OKX instrument ID
-    start_ms : int, optional
-        起始时间戳, OKX API 设定为不包含起始时间点, by default None
-    end_ms : int, optional
-        截止时间戳, OKX API 设定为不包含截止时间点, by default None
-
-    Returns
-    -------
-    pd.DataFrame
-        _description_
     """
-    url = "https://www.okx.com/api/v5/public/funding-rate-history"
-    period = 2 / 10  # 限速 10次/2s
-    all_rates = []
-    current_end = end_ms
-    while True:
-        params = {"instId": inst_id, "after": current_end, "limit": "100"}
-        if start_ms:
-            params["before"] = start_ms
-        try:
-            response = requests.get(url, params=params)
-            data = response.json()
+    url = "https://www.okx.com/api/v5/public/funding-rate"
+    params = {"instId": inst_id}
+    try:
+        response = requests.get(url, params=params)
+        data = response.json()
 
-            # 错误处理
-            if data["code"] != "0":
-                print(f"API错误: {data['msg']}")
-                break
+        # 错误处理
+        if data["code"] != "0":
+            print(f"API错误: {data['msg']}")
+        if not data["data"]:
+            raise ValueError(f"API获取{inst_id}资金费率为空")
+    except Exception as e:
+        print(f"请求失败: {e}")
+    rate = data["data"][0]
 
-            if not data["data"]:
-                break
+    return rate
 
-            rates = data["data"]
-            all_rates.extend(rates)
-            # 获取最早一条数据的时间戳
-            earliest_ms = int(rates[-1]["fundingTime"])
-            if start_ms and earliest_ms <= start_ms:
-                break
 
-            current_end = earliest_ms - 1  # 避免重复
-            time.sleep(period)  # 控制请求频率（OKX公共接口限制10次/2秒）
-
-        except Exception as e:
-            print(f"请求失败: {e}")
-            break
-
-    # 转换为DataFrame
-    df = pd.DataFrame(all_rates)
+def fetch_all_funding_rate() -> pd.DataFrame:
+    swaps = get_all_markets(inst_type="SWAP")
+    funding_rates = []
+    pbar = tqdm(swaps["instId"])
+    for inst_id in pbar:
+        pbar.set_description(desc=f"fetching {inst_id}")
+        funding_rates.append(fetch_funding_rate(inst_id))
+        # time.sleep(2 / 20)  # 限速：20次/2s
+    df = pd.DataFrame(funding_rates)
     if not df.empty:
-        df["fundingTime"] = pd.to_datetime(
-            df["fundingTime"].astype(int), utc=True, unit="ms"
-        )
-        df["fundingRate"] = df["fundingRate"].astype(float)
-        df["realizedRate"] = df["realizedRate"].astype(float)
-        df = df.sort_values("fundingTime").reset_index(drop=True)
+        for ts_col in ["fundingTime", "nextFundingTime", "ts"]:
+            df[ts_col] = pd.to_datetime(df[ts_col].astype(int), utc=True, unit="ms")
+        for rate_col in [
+            "fundingRate",
+            "nextFundingRate",
+            "minFundingRate",
+            "maxFundingRate",
+            "settFundingRate",
+            "premium",
+        ]:
+            df[rate_col] = pd.to_numeric(df[rate_col], errors="coerce")
+        df = df.sort_values("instId").reset_index(drop=True)
 
     return df
+
+
+def download_historical_funding_rates(date: datetime.date | pd.Timestamp):
+    savepath = Path("./data/swaprate")
+    savepath.mkdir(parents=True, exist_ok=True)
+    wraprate_monthly_url = "https://www.okx.com/cdn/okex/traderecords/swaprate/monthly/"
+    filename = "swaprate-" + date.strftime("%Y-%m-%d") + ".zip"
+    url = wraprate_monthly_url + date.strftime("%Y%m") + "/allswaprate-" + filename
+    filepath = savepath.joinpath(filename)
+    stream_download(url, filepath)
+
+
+class OKXDownloader:
+    def __init__(self, savepath: Path = Path(".data"), max_workers=5, rate_limit=0):
+        """
+        :param max_workers: 最大并发工作线程数
+        :param rate_limit: 请求间隔（秒）
+        """
+        self.savepath: Path = savepath
+        self.rate_limit = rate_limit
+        self.executor = futures.ThreadPoolExecutor(max_workers=max_workers)
+        self._urls: list[str] = None
+        self._futures: list[futures.Future] = []
+
+    def _submit_tasks(self):
+        """带速率控制的下载任务"""
+        for i, url in enumerate(self._urls):
+            filename = unquote(url.split("/")[-1])
+            filepath = self.savepath.joinpath(filename)
+            target = wait_then_exec(self.rate_limit * i)(stream_download)
+            future = self.executor.submit(target, url, filepath)
+            self._futures.append(future)
+
+    def add_urls(self, urls: str | list[str]):
+        """添加下载任务"""
+        if isinstance(urls, str):
+            urls = [urls]
+        self._urls = urls
+
+    def _monitor(self):
+        num = 0
+        for f in futures.as_completed(self._futures):
+            filepath = f.result()
+            print(f"{filepath} downloading complete")
+            num += 1
+        print(f"{num} files downloaded")
+
+    def start(self):
+        """启动下载任务"""
+        self.savepath.mkdir(parents=True, exist_ok=True)
+        self._submit_tasks()
+        self._monitor()
