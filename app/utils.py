@@ -1,8 +1,10 @@
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 import random
 import time
 
+import pandas as pd
 import requests
 from tqdm import tqdm
 
@@ -76,3 +78,13 @@ def download_file_with_progress(url, save_path):
         print(f"\n文件已下载到: {save_path}")
     except requests.exceptions.RequestException as e:
         print(f"下载失败: {e}")
+
+
+def csv_to_parquet(
+    from_file: Path,
+    to_file: Path,
+    encoding: str = "utf-8",
+    compression: str = "brotli",
+):
+    df = pd.read_csv(from_file, encoding=encoding)
+    df.to_parquet(to_file, compression=compression)

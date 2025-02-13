@@ -170,5 +170,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# IOS file
+.DS_store/
+
 # data directory
 ./data
