@@ -8,7 +8,6 @@ import time
 SS_CONFIG = {
     "server": "c90s1.portablesubmarines.com",
     "server_port": 19597,
-    "password": "",
     "method": "aes-256-gcm",
     "local_port": 1080,  # 本地 SOCKS5 代理端口
 }

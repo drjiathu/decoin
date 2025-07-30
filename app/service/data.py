@@ -1,12 +1,16 @@
+import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tqdm import tqdm
 
 from app.api.okx import (
+    download_historical_funding_rates,
     get_all_markets,
     fetch_historical_candles,
     fetch_historical_funding_rate,
 )
+from config import OKX_DATAPATH
 
 
 DATAPATH = Path("./data")

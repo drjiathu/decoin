@@ -1,14 +1,22 @@
+from collections import Counter
 from concurrent import futures
 import datetime
 from pathlib import Path
 import time
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 from tqdm import tqdm
 
+from app.async_utils import download_many, DownloadStatus
 from app.utils import retry, stream_download, wait_then_exec
+from config import OKX_DATAPATH
+
+START_DATE = datetime.date(2021, 10, 1)
+HISTORICAL_TRADE_URL = "https://www.okx.com/cdn/okex/traderecords/trades/monthly/"
+HISTORICAL_SWAPRATE_URL = "https://www.okx.com/cdn/okex/traderecords/swaprate/monthly/"
 
 
 def get_option_underlyings():
@@ -56,10 +64,10 @@ def get_all_options():
 
 def get_instruments(
     inst_type,
-    uly: str = None,
-    inst_family: str = None,
-    inst_id: str = None,
-) -> pd.DataFrame:
+    uly: str | None = None,
+    inst_family: str | None = None,
+    inst_id: str | None = None,
+) -> pd.DataFrame | None:
     """
     获取OKX指定类型的产品信息
     :param
@@ -131,7 +139,7 @@ def get_instruments(
 
 
 @retry(max_retries=3)
-def get_all_markets(inst_type: str = None) -> pd.DataFrame:
+def get_all_markets(inst_type: str | None = None) -> pd.DataFrame:
     all_types = ["SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION"]
     inst_types = [inst_type] if inst_type else all_types
     data = []
@@ -149,8 +157,8 @@ def get_all_markets(inst_type: str = None) -> pd.DataFrame:
 def fetch_historical_candles(
     inst_id: str,
     bar="1m",
-    start_ms: int = None,
-    end_ms: int = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
 ):
     """从 API 获取最近几年的历史k线数据(1s k线支持查询最近3个月的数据)
 
@@ -226,7 +234,7 @@ def fetch_historical_candles(
 
 
 @retry(max_retries=3)
-def fetch_funding_rate(inst_id: str) -> dict:
+def fetch_funding_rate(inst_id: str) -> float | None:
     """获取永续合约资金费率数据
 
     Parameters
@@ -235,6 +243,7 @@ def fetch_funding_rate(inst_id: str) -> dict:
     """
     url = "https://www.okx.com/api/v5/public/funding-rate"
     params = {"instId": inst_id}
+    rate = None
     try:
         response = requests.get(url, params=params)
         data = response.json()
@@ -244,9 +253,10 @@ def fetch_funding_rate(inst_id: str) -> dict:
             print(f"API错误: {data['msg']}")
         if not data["data"]:
             raise ValueError(f"API获取{inst_id}资金费率为空")
+        else:
+            rate = data["data"][0]
     except Exception as e:
         print(f"请求失败: {e}")
-    rate = data["data"][0]
 
     return rate
 
@@ -277,18 +287,86 @@ def fetch_all_funding_rate() -> pd.DataFrame:
     return df
 
 
-def download_historical_funding_rates(date: datetime.date | pd.Timestamp):
-    savepath = Path("./data/swaprate")
+def download_daily_funding_rates(date: datetime.date | pd.Timestamp):
+    month_str = date.strftime("%Y%m")
+    savepath = OKX_DATAPATH / "swaprate"
     savepath.mkdir(parents=True, exist_ok=True)
-    wraprate_monthly_url = "https://www.okx.com/cdn/okex/traderecords/swaprate/monthly/"
-    filename = "swaprate-" + date.strftime("%Y-%m-%d") + ".zip"
-    url = wraprate_monthly_url + date.strftime("%Y%m") + "/allswaprate-" + filename
-    filepath = savepath.joinpath(filename)
+    filename = "allswaprate-swaprate-" + date.strftime("%Y-%m-%d") + ".zip"
+    url = HISTORICAL_SWAPRATE_URL + f"{month_str}/" + filename
+    filepath = savepath / filename
     stream_download(url, filepath)
 
 
+def download_daily_trades(date: datetime.date | pd.Timestamp):
+    types = ["spot", "swap", "option"]
+    month_str = date.strftime("%Y%m")
+    for t in types:
+        savepath = OKX_DATAPATH / t
+        savepath.mkdir(parents=True, exist_ok=True)
+        filename = f"all{t}-trades-{date.isoformat()}.zip"
+        url = HISTORICAL_TRADE_URL + f"{month_str}/" + filename
+        filepath = savepath / filename
+        stream_download(url, filepath)
+
+
+def download_all_historical_spot_trades(verbose=False, concur_req=10):
+    start = START_DATE
+    end = datetime.datetime.now().date()
+    dates = [start + datetime.timedelta(days=i) for i in range((end - start).days)]
+    base_url = HISTORICAL_TRADE_URL
+    urls = [
+        base_url + f"{d.strftime('%Y%m')}/allspot-trades-{d.isoformat()}.zip"
+        for d in dates
+    ]
+    save_path = OKX_DATAPATH / "spot"
+    save_path.mkdir(parents=True, exist_ok=True)
+    counts = download_many(urls, save_path, verbose, concur_req)
+    return counts
+
+
+def download_all_historical_trades(
+    verbose=False, concur_req=10
+) -> Counter[DownloadStatus]:
+    types = ["spot", "swap", "option"]
+    start = START_DATE
+    end = datetime.datetime.now().date()
+    start = end - datetime.timedelta(days=10)
+    dates = [start + datetime.timedelta(days=i) for i in range((end - start).days)]
+    base_url = HISTORICAL_TRADE_URL
+    counts = Counter[DownloadStatus]()
+    for t in types:
+        urls = [
+            base_url + f"{d.strftime('%Y%m')}/all{t}-trades-{d.isoformat()}.zip"
+            for d in dates
+        ]
+        save_path = OKX_DATAPATH / t
+        save_path.mkdir(parents=True, exist_ok=True)
+        counts += download_many(urls, save_path, verbose, concur_req)
+
+    return counts
+
+
+def download_all_historical_funding_rates(
+    verbose=False, concur_req=10
+) -> Counter[DownloadStatus]:
+    # API 基础 URL
+    start = START_DATE
+    end = datetime.datetime.now(tz=ZoneInfo("UTC")).date()
+    dates = [start + datetime.timedelta(days=i) for i in range((end - start).days)]
+    base_url = HISTORICAL_SWAPRATE_URL
+    urls = [
+        base_url + f"{d.strftime('%Y%m')}/allswaprate-swaprate-{d.isoformat()}.zip"
+        for d in dates
+    ]
+    save_path = OKX_DATAPATH / "swaprate"
+    save_path.mkdir(parents=True, exist_ok=True)
+    counts = download_many(urls, save_path, verbose, concur_req)
+
+    return counts
+
+
 class OKXDownloader:
-    def __init__(self, savepath: Path = Path(".data"), max_workers=5, rate_limit=0):
+    def __init__(self, savepath: Path = OKX_DATAPATH, max_workers=5, rate_limit=0):
         """
         :param max_workers: 最大并发工作线程数
         :param rate_limit: 请求间隔（秒）
@@ -296,12 +374,12 @@ class OKXDownloader:
         self.savepath: Path = savepath
         self.rate_limit = rate_limit
         self.executor = futures.ThreadPoolExecutor(max_workers=max_workers)
-        self._urls: list[str] = None
+        self._urls: list[str] | None = None
         self._futures: list[futures.Future] = []
 
     def _submit_tasks(self):
         """带速率控制的下载任务"""
-        for i, url in enumerate(self._urls):
+        for i, url in enumerate(self._urls if self._urls else []):
             filename = unquote(url.split("/")[-1])
             filepath = self.savepath.joinpath(filename)
             target = wait_then_exec(self.rate_limit * i)(stream_download)

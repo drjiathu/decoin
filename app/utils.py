@@ -1,10 +1,11 @@
 from datetime import datetime
 from functools import wraps
+import hashlib
 from pathlib import Path
 import random
 import time
 
-import pandas as pd
+import pytz
 import requests
 from tqdm import tqdm
 
@@ -42,19 +43,68 @@ def wait_then_exec(wait=0):
     return decorator
 
 
-def unix_timestamp_ms_to_datetime(timestamp_ms: int) -> datetime:
-    return datetime.fromtimestamp(timestamp_ms / 1_000)
+def unix_timestamp_to_datetime(timestamp: int, unit: str = "ms", tz=None) -> datetime:
+
+    if tz is None:
+        tz = pytz.timezone("UTC")
+    elif isinstance(tz, str):
+        tz = pytz.timezone(tz)
+    else:
+        raise ValueError("Invalid timezone")
+
+    if unit == "ms":
+        divider = 1_000
+    elif unit == "us":
+        divider = 1_000_000
+    else:
+        raise ValueError("Invalid unit")
+
+    return datetime.fromtimestamp(timestamp / divider, tz=tz)
 
 
-def stream_download(url, filepath):
+def stream_download(url: str, filepath: Path | str) -> Path:
+    filepath = Path(filepath)
     # 流式下载大文件
     with requests.get(url, stream=True, timeout=10) as r:
         r.raise_for_status()
+        if filepath.exists():
+            print(f"文件已存在: {filepath}")
+            return filepath
         with open(filepath, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
                 if chunk:  # 过滤保持连接的空白块
                     f.write(chunk)
     return filepath
+
+
+def checksum(
+    filepath: str, checksum_url: str, hash_algorithm: str = "sha256"
+) -> tuple[bool, str]:
+    try:
+        response = requests.get(checksum_url, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to get checksum {checksum_url}: {e}")
+        raise e
+
+    expected_checksum = response.text.split()[0]
+    hash_obj = hashlib.new(hash_algorithm)
+    with open(filepath, "rb") as f:
+        # 分块读取以处理大文件
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_obj.update(chunk)
+    actual_checksum = hash_obj.hexdigest()
+
+    # 比较哈希值
+    if actual_checksum == expected_checksum:
+        return True, f"checksum successful: {filepath}"
+    else:
+        return (
+            False,
+            f"checksum failed: {filepath}\n"
+            f"expected: {expected_checksum}\n"
+            f"actual: {actual_checksum}",
+        )
 
 
 def download_file_with_progress(url, save_path):
@@ -78,13 +128,3 @@ def download_file_with_progress(url, save_path):
         print(f"\n文件已下载到: {save_path}")
     except requests.exceptions.RequestException as e:
         print(f"下载失败: {e}")
-
-
-def csv_to_parquet(
-    from_file: Path,
-    to_file: Path,
-    encoding: str = "utf-8",
-    compression: str = "brotli",
-):
-    df = pd.read_csv(from_file, encoding=encoding)
-    df.to_parquet(to_file, compression=compression)

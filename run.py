@@ -7,8 +7,14 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 
-from app.api.okx import OKXDownloader
+from app.api.okx import (
+    OKXDownloader,
+    download_historical_funding_rates,
+    download_all_historical_funding_rates,
+)
 from app.utils import stream_download
+
+START_DATE = datetime.date(2021, 10, 1)
 
 
 def download_many(
@@ -28,13 +34,12 @@ def download_many(
     return num
 
 
-def main1():
+def main():
     base = "https://www.okx.com/cdn/okex/traderecords/swaprate/monthly/"
     end_date = datetime.datetime.now(tz=ZoneInfo("UTC")).date() - datetime.timedelta(
         days=1
     )
-    start_date = datetime.date(2021, 10, 1)
-    dates = pd.date_range(start=start_date, end=end_date)
+    dates = pd.date_range(start=START_DATE, end=end_date)
     urls = [
         base + f"{d.strftime('%Y%m')}/allswaprate-swaprate-{d.strftime('%Y-%m-%d')}.zip"
         for d in dates
@@ -44,6 +49,24 @@ def main1():
     downloader.start()
 
 
+def update_swaprates():
+    swaprate_datapath = Path("./data/OKX") / "swaprate"
+    files = sorted(swaprate_datapath.glob("*.zip"), reverse=True)
+    date = datetime.date(*map(int, files[0].stem.split("-")[-3:])) + datetime.timedelta(
+        days=1
+    )
+    today = datetime.datetime.now(tz=ZoneInfo("UTC")).date()
+    while date < today:
+        download_historical_funding_rates(date)
+        date += datetime.timedelta(days=1)
+
+
+def download_okx_swaprate():
+    download_all_historical_funding_rates(True, 10)
+
+
 # 运行主函数
 if __name__ == "__main__":
-    main1()
+    # main()
+    download_okx_swaprate()
+    # update_swaprates()
