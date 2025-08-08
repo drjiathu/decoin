@@ -40,6 +40,6 @@ END_DATE = date.today()
 PERIOD_START_DATE = "2020-01-01"
 
 BINNACE_TRADING_TYPE = ["spot", "um", "cm"]
-BINANCE_BASE_URL = "https://data.binance.vision/"
+BINANCE_DATA_BASE_URL = "https://data.binance.vision/data/"
 
-OKX_BASE_URL = "https://www.okx.com/data-download"
+OKX_DATA_BASE_URL = "https://www.okx.com/data-download"
