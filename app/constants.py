@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 YEARS = ["2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025"]
 INTERVALS = [
@@ -40,6 +41,7 @@ END_DATE = date.today()
 PERIOD_START_DATE = "2020-01-01"
 
 BINNACE_TRADING_TYPE = ["spot", "um", "cm"]
-BINANCE_DATA_BASE_URL = "https://data.binance.vision/data/"
+BINANCE_DATA_BASE_URL = "https://data.binance.vision/data"
 
-OKX_DATA_BASE_URL = "https://www.okx.com/data-download"
+OKX_DATA_BASE_URL = "https://www.okx.com/cdn/okex"
+# OKX_DATA_BASE_URL = "https://www.okx.com/data-download"

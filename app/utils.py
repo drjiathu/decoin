@@ -77,8 +77,8 @@ def stream_download(url: str, filepath: Path | str) -> Path:
     return filepath
 
 
-def checksum(
-    filepath: str, checksum_url: str, hash_algorithm: str = "sha256"
+def file_checksum(
+    filepath: str | Path, checksum_url: str, hash_algorithm: str = "sha256"
 ) -> tuple[bool, str]:
     try:
         response = requests.get(checksum_url, timeout=30)

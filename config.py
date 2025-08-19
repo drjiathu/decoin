@@ -1,3 +1,4 @@
 from pathlib import Path
 
-OKX_DATAPATH = Path("./data/OKX")
+RAWDATAPATH = Path("./raw_data")
+DATAPATH = Path("./data")
